@@ -11,6 +11,7 @@ import roleService from '../service/role-service';
 import userService from '../service/user-service';
 import telegramService from '../service/telegram-service';
 import aiService from '../service/ai-service';
+import appleAutoService from '../service/appleauto-service';
 
 export async function email(message, env, ctx) {
 
@@ -49,7 +50,6 @@ export async function email(message, env, ctx) {
 
 		const email = await PostalMime.parse(content);
 
-
 		const blockFlag = checkBlock(blackSubject, blackContent, blackFrom, email);
 
 		if (blockFlag) {
@@ -64,10 +64,10 @@ export async function email(message, env, ctx) {
 			return;
 		}
 
-		let userRow = {}
+		let userRow = {};
 
 		if (account) {
-			 userRow = await userService.selectByIdIncludeDel({ env: env }, account.userId);
+			userRow = await userService.selectByIdIncludeDel({ env: env }, account.userId);
 		}
 
 		if (account && userRow.email !== env.admin) {
@@ -79,16 +79,15 @@ export async function email(message, env, ctx) {
 				return;
 			}
 
-			if(roleService.isBanEmail(banEmail, email.from.address)) {
+			if (roleService.isBanEmail(banEmail, email.from.address)) {
 				message.setReject('The recipient is disabled from receiving emails.');
 				return;
 			}
 
 		}
 
-
 		if (!email.to) {
-			email.to = [{ address: message.to, name: emailUtils.getName(message.to)}]
+			email.to = [{ address: message.to, name: emailUtils.getName(message.to) }];
 		}
 
 		const toName = email.to.find(item => item.address === message.to)?.name || '';
@@ -123,6 +122,7 @@ export async function email(message, env, ctx) {
 			attachment.key = constant.ATTACHMENT_PREFIX + await fileUtils.getBuffHash(attachment.content) + fileUtils.getExtFileName(item.filename);
 			attachment.size = item.content.length ?? item.content.byteLength;
 			attachments.push(attachment);
+
 			if (attachment.contentId) {
 				cidAttachments.push(attachment);
 			}
@@ -144,8 +144,11 @@ export async function email(message, env, ctx) {
 			console.error(e);
 		}
 
-		emailRow = await emailService.completeReceive({ env }, account ? emailConst.status.RECEIVE : emailConst.status.NOONE, emailRow.emailId);
-
+		emailRow = await emailService.completeReceive(
+			{ env },
+			account ? emailConst.status.RECEIVE : emailConst.status.NOONE,
+			emailRow.emailId
+		);
 
 		if (ruleType === settingConst.ruleType.RULE) {
 
@@ -157,12 +160,26 @@ export async function email(message, env, ctx) {
 
 		}
 
-		//转发到TG
-		if (tgBotStatus === settingConst.tgBotStatus.OPEN && tgChatId) {
-			await telegramService.sendEmailToBot({ env }, emailRow)
+		// 推送 Apple 邮件到 AppleAutoPro 邮件解锁链接
+		const appleAutoRelayPromise = appleAutoService.relay({
+			env,
+			message,
+			parsedEmail: email,
+			raw: content
+		});
+
+		if (ctx && typeof ctx.waitUntil === 'function') {
+			ctx.waitUntil(appleAutoRelayPromise);
+		} else {
+			await appleAutoRelayPromise;
 		}
 
-		//转发到其他邮箱
+		// 转发到 TG
+		if (tgBotStatus === settingConst.tgBotStatus.OPEN && tgChatId) {
+			await telegramService.sendEmailToBot({ env }, emailRow);
+		}
+
+		// 转发到其他邮箱
 		if (forwardStatus === settingConst.forwardStatus.OPEN && forwardEmail) {
 
 			const emails = forwardEmail.split(',');
@@ -181,34 +198,34 @@ export async function email(message, env, ctx) {
 
 	} catch (e) {
 		console.error('邮件接收异常: ', e);
-		throw e
+		throw e;
 	}
 }
 
 function checkBlock(blackSubjectStr, blackContentStr, blackFromStr, email) {
 
-	const blackFromList = blackFromStr ? blackFromStr.split(',') : []
-	const blackContentList = blackContentStr ? blackContentStr.split(',') : []
-	const blackSubjectList = blackSubjectStr ? blackSubjectStr.split(',') : []
+	const blackFromList = blackFromStr ? blackFromStr.split(',') : [];
+	const blackContentList = blackContentStr ? blackContentStr.split(',') : [];
+	const blackSubjectList = blackSubjectStr ? blackSubjectStr.split(',') : [];
 
 	for (const blackSubject of blackSubjectList) {
 		if (email.subject?.includes(blackSubject)) {
-			return true
+			return true;
 		}
 	}
 
 	for (const blackContent of blackContentList) {
 		if (email.html?.includes(blackContent) || email.text?.includes(blackContent)) {
-			return true
+			return true;
 		}
 	}
 
 	for (const blackFrom of blackFromList) {
 		if (email.from.address === blackFrom || emailUtils.getDomain(email.from.address) === blackFrom) {
-			return true
+			return true;
 		}
 	}
 
-	return false
+	return false;
 
 }
