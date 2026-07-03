@@ -82,14 +82,28 @@ function isAppleMail(parsedEmail, message) {
 	const from = parsedEmail?.from?.address || message?.from || '';
 	const domain = getDomain(from);
 	const subject = parsedEmail?.subject || '';
+	const text = parsedEmail?.text || '';
+	const html = parsedEmail?.html || '';
 
 	const domainOk = DEFAULT_APPLE_DOMAINS.some(d => {
 		return domain === d || domain.endsWith(`.${d}`);
 	});
 
-	const subjectOk = /apple|apple id|apple account|icloud|验证码|驗證|验证|解锁|解鎖|安全|重设|重設|恢复|恢復|账户|帳户|帐户|雙重認證|双重认证|two-factor|verification|verify|unlock|security|reset|recover/i.test(subject);
+	if (!domainOk) {
+		return false;
+	}
 
-	return domainOk && subjectOk;
+	const fullText = `${subject}\n${text}\n${html}`;
+
+	// 只处理真正可用于恢复/解除双重认证的 Apple 邮件
+	const hasRestoreLinkText =
+		/回復先前的保安設定|恢復先前的保安設定|恢复先前的安全设置|恢复先前的保安设置|restore previous security settings|return to your previous security settings/i.test(fullText);
+
+	const twoFactorEnabled =
+		/(雙重認證|双重认证|雙重驗證|双重验证|two-factor authentication|two factor authentication|two-step verification).{0,160}(啟用|启用|已於|已于|已在|enabled|turned on)/i.test(fullText) ||
+		/(啟用|启用|已於|已于|已在|enabled|turned on).{0,160}(雙重認證|双重认证|雙重驗證|双重验证|two-factor authentication|two factor authentication|two-step verification)/i.test(fullText);
+
+	return hasRestoreLinkText || twoFactorEnabled;
 }
 
 async function postWithTimeout(url, init, timeoutMs = 12000) {
@@ -139,7 +153,7 @@ function buildPostalHashPayload({ message, parsedEmail, raw }) {
 	const autoSubmittedHeader = getHeader(parsedEmail, 'auto-submitted') || '';
 
 	return {
-		// Postal Hash 默认格式核心字段
+		// Postal Hash 格式核心字段
 		id: parsedEmail?.messageId || crypto.randomUUID(),
 		rcpt_to: rcptTo,
 		mail_from: mailFrom,
@@ -152,7 +166,7 @@ function buildPostalHashPayload({ message, parsedEmail, raw }) {
 		bounce: false,
 		received_with_ssl: true,
 
-		// Postal Hash 默认 header 字段
+		// Postal Hash Header 字段
 		to: toHeader,
 		cc: ccHeader,
 		from: fromHeader,
@@ -162,14 +176,14 @@ function buildPostalHashPayload({ message, parsedEmail, raw }) {
 		auto_submitted: autoSubmittedHeader,
 		reply_to: replyToHeader,
 
-		// Postal Hash 默认正文字段
+		// Postal Hash 正文字段
 		html_body: parsedEmail?.html || '',
 		plain_body: parsedEmail?.text || '',
 
-		// Postal Hash 默认附件字段
+		// Postal Hash 附件字段
 		attachment_quantity: Array.isArray(parsedEmail?.attachments) ? parsedEmail.attachments.length : 0,
 
-		// 额外兼容字段，不影响 Postal 格式
+		// 额外兼容字段
 		raw: raw
 	};
 }
@@ -246,7 +260,7 @@ async function relay({ env, message, parsedEmail, raw }) {
 		}
 
 		if (env.APPLEAUTO_ONLY_APPLE !== '0' && !isAppleMail(parsedEmail, message)) {
-			console.log('[AppleAutoPro] not apple mail, skip:', parsedEmail?.from?.address, parsedEmail?.subject);
+			console.log('[AppleAutoPro] not actionable Apple unlock mail, skip:', parsedEmail?.from?.address, parsedEmail?.subject);
 			return;
 		}
 
@@ -277,7 +291,6 @@ async function relay({ env, message, parsedEmail, raw }) {
 
 		let businessOk = result.ok && isBusinessSuccess(result.responseText);
 
-		// 如果对方仍提示 mail_from 无效，说明它可能不是读 JSON body，而是读表单参数；自动用表单重试一次
 		if (!businessOk && shouldRetryAsForm(result.responseText) && mode !== 'postal_hash_form') {
 			console.log('[AppleAutoPro] retry as postal hash form because:', result.responseText.slice(0, 500));
 
